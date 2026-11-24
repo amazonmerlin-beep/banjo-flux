@@ -1,0 +1,15 @@
+{
+  "source": "https://data.assemblee-nationale.fr/static/openData/repository/17/vp/syceronbrut/syseron.xml.zip",
+  "last_modified": "Tue, 24 Nov 2026 03:05:39 GMT",
+  "etag": "\"3c09f10-660fcfc39770a\"",
+  "content_length": "62955280",
+  "octets": 62955280,
+  "sha256": "d88db29cd99911e5ae4060d41222f1776f5a44fa3c2fa7ca9965e9210dfd39e0",
+  "membres": 672,
+  "legislature_suivante": {
+    "url": "https://data.assemblee-nationale.fr/static/openData/repository/18/vp/syceronbrut/syseron.xml.zip",
+    "http": 404
+  },
+  "relaye_a": "2026-11-24T18:22:16Z",
+  "execution": "https://github.com/amazonmerlin-beep/banjo-flux/actions/runs/45458675124"
+}
