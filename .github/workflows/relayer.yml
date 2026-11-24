@@ -1,0 +1,113 @@
+name: relayer
+
+# Relaie chaque matin le flux Syceron de l'Assemblée nationale (législature 17) dans la
+# release `syceron-17`, pour le serveur de BanJO, que le CDN de l'Assemblée ne laisse pas
+# passer (constat du 2026-11-24). L'Assemblée réécrit le flux vers 03:05 UTC.
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: relayer
+  cancel-in-progress: false
+
+env:
+  FLUX: https://data.assemblee-nationale.fr/static/openData/repository/17/vp/syceronbrut/syseron.xml.zip
+  SUIVANTE: https://data.assemblee-nationale.fr/static/openData/repository/18/vp/syceronbrut/syseron.xml.zip
+  UA: banjo-flux/1.0 (+https://github.com/amazonmerlin-beep/banjo-flux)
+  ETIQUETTE: syceron-17
+  BORNE: "536870912" # 512 Mio : un flux démesuré est refusé
+
+jobs:
+  relayer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: télécharger le flux
+        run: |
+          set -euo pipefail
+          mkdir -p sortie && cd sortie
+          curl -fsS --retry 5 --retry-all-errors --connect-timeout 30 -m 900 \
+            -A "$UA" -D ../entetes.txt -o syseron.xml.zip "$FLUX"
+          cat ../entetes.txt
+
+      - name: vérifier le zip
+        run: |
+          set -euo pipefail
+          cd sortie
+          octets=$(stat -c %s syseron.xml.zip)
+          [ "$octets" -gt 0 ] || { echo "flux vide" >&2; exit 1; }
+          [ "$octets" -le "$BORNE" ] || { echo "flux démesuré : $octets o" >&2; exit 1; }
+          [ "$(head -c 4 syseron.xml.zip | od -An -tx1 | tr -d ' ')" = "504b0304" ] \
+            || { echo "pas un zip (signature absente)" >&2; exit 1; }
+          unzip -tq syseron.xml.zip
+          sha256sum syseron.xml.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: sonder la législature suivante
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -I --connect-timeout 30 -m 60 -A "$UA" "$SUIVANTE" || echo 000)
+          echo "législature 18 : HTTP $code"
+          echo "$code" > suivante.txt
+
+      - name: écrire meta.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess, time, zipfile
+          ent = {}
+          for ligne in open("entetes.txt", encoding="latin-1"):
+              if ":" in ligne:
+                  k, v = ligne.split(":", 1)
+                  ent[k.strip().lower()] = v.strip()
+          z = "sortie/syseron.xml.zip"
+          h = hashlib.sha256(open(z, "rb").read()).hexdigest()
+          code = open("suivante.txt").read().strip()
+          meta = {
+              "source": os.environ["FLUX"],
+              "last_modified": ent.get("last-modified"),
+              "etag": ent.get("etag"),
+              "content_length": ent.get("content-length"),
+              "octets": os.path.getsize(z),
+              "sha256": h,
+              "membres": len(zipfile.ZipFile(z).namelist()),
+              "legislature_suivante": {"url": os.environ["SUIVANTE"], "http": int(code) if code.isdigit() else None},
+              "relaye_a": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "execution": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }
+          json.dump(meta, open("sortie/meta.json", "w"), ensure_ascii=False, indent=2)
+          print(json.dumps(meta, ensure_ascii=False, indent=2))
+          PY
+
+      - name: publier dans la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd sortie
+          if ! gh release view "$ETIQUETTE" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --latest \
+              --title "Flux Syceron de l'Assemblée nationale, législature 17 (relais quotidien)" \
+              --notes "Copie quotidienne de $FLUX, publiée par l'Assemblée nationale sous Licence Ouverte (Etalab 2.0). Voir le LISEZ-MOI du dépôt. Le fichier meta.json donne l'empreinte, la date de réécriture du flux par l'Assemblée et l'heure du relais."
+          fi
+          gh release upload "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --clobber syseron.xml.zip SHA256SUMS.txt meta.json
+
+      - name: verser meta.json dans le dépôt
+        # Un commit par jour : l'historique des relais, et l'activité qui garde le
+        # minuteur en vie (GitHub coupe les minuteurs d'un dépôt public après 60 jours
+        # sans activité).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/meta.json" -q .sha 2>/dev/null || true)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha=
+          contenu=$(base64 -w0 sortie/meta.json)
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/meta.json" \
+            -f message="relais du $(date -u +%Y-%m-%d)" -f content="$contenu" \
+            ${sha:+-f sha="$sha"} >/dev/null
